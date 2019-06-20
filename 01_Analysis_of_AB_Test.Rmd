@@ -1,0 +1,680 @@
+---
+title: "Shopper Hiring Problem"
+author: "Jason Dexter (5/20/2019)"
+output:
+  pdf_document: 
+    toc: yes
+  html_document: default
+subtitle: Analyzing A/B Test Results on Shopper Hiring Funnel
+---
+
+\  
+
+### PROJECT + ASSIGNMENT OVERVIEW
+
+**Problem Statment:** Low conversion rates of new hires b/c of drop out during hiring funnel.
+
+**Potential Solution:** Initiate applicant background check earlier in hiring funnel (on day one).
+
+**Objective:** Analyze A/B Test results and assess the viability of posed solution for improving conversion rates.
+
+\  
+
+Ultimately, we want to see if initiating the background check sooner: 
+
+1) Increases the liklihood of applicants starting as shoppers.
+2) Gets the shoppers to start more quickly.
+
+\  
+
+**Questions Driving Analysis** - need to be answered/delivered via slide-deck (decision-making-audience):
+
+1) What can we conclude at this point from the A/B test?
+2) How confident should we be in this conclusion?
+3) Is this change cost-effective?
+4) How should we think about the cost-effectiveness or return on investment of this change?
+    - Consider alternate costs: $50 or $100 instead of $30 (be as specific as possible)
+5) What other observations and recomendations do you have for us, based on this data?
+    - E.g., what else did you find that seems relevant, or what else would you want to test if we ran an additional experiment?
+
+\newpage
+
+
+# Project Phase 1.0: Initial Exploratory Data Analysis (EDA)
+
+**Objective w/EDA:** Gain understanding of event-level data so I can use insights to aggregate/summarize data to the applicant-level. The applicant-level data will be what I use to analyze the A/B test results. 
+
+```{r setup, include=TRUE}
+# Set global options for code chunks
+knitr::opts_chunk$set(
+    echo    = TRUE,
+    message = FALSE,
+    warning = FALSE)
+
+# Tell RMarkdown to recognize the root directory of my Rproj file
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+```{r}
+# Load libraries + source plotting function
+library(tidyverse)
+library(lubridate)
+library(tidyquant)
+library(stringr)
+library(sigr)
+source("00_Scripts/plot_ggpairs.R")
+
+# Read in raw data
+applicant_raw_tbl <- read_csv("00_Data/applicant_data.csv")
+```
+
+
+### 1.1 VIEW DATA + ASSESS DATA TYPES + ASSESS MISSING DATA
+
+```{r}
+# View data
+applicant_raw_tbl %>% head(4) 
+
+# Assess missing data (NA values): could be other ways of data missing (this is a good 1st look)
+applicant_raw_tbl %>% 
+
+    # Iterate across columns and calculate % missing
+    map_df(~ sum(is.na(.)) / length(.)) %>% 
+    knitr::kable(caption = "No NA values present in dataset")
+```
+
+
+### 1.2 INITIAL DATA CLEANING
+```{r}
+# Clean raw data where needed
+applicant_tbl <- applicant_raw_tbl %>% 
+    # Parse dates in event_date column
+    mutate(event_date = mdy(event_date))
+```
+
+
+### 1.3 INSPECT CATEGORICAL DATA
+
+- Here I did not include the output b/c I just did a quick look at distinct groups per categorical variable.
+- This included channel, group, city, and event type.
+- I'm getting a sense of what categories exists, their values, and what I might use later to **explain any variation discovered.**
+
+```{r, include=FALSE}
+# What channels exist?
+applicant_tbl %>% distinct(channel)
+
+# What groups exist?
+applicant_tbl %>% distinct(group)
+
+# What cities exist?
+applicant_tbl %>% distinct(city)
+
+# What events exist?
+applicant_tbl %>% distinct(event)
+```
+
+
+### 1.4 INSPECT DISTINCT APPLICANTS AND GROUP SAMPLE SIZE(S)
+
+- Looks like the study was intentionally setup as a 2/3 control & 1/3 treatment (setup/study design)
+
+```{r, include=TRUE, echo=FALSE}
+# Summarize to get distinct applicant counts by group
+applicant_tbl %>% 
+    
+    # Aggregate data to get distinct applicants
+    group_by(applicant_id, group) %>% 
+    summarize(n = n()) %>% 
+    ungroup() %>% 
+    
+    # Count distinct applicants by group and calculate percent by group
+    count(group) %>% 
+    mutate(pct_in_group = (n / sum(n)) %>% scales::percent()) %>% 
+    knitr::kable(caption = "% Distinct Applicants by Test Group")
+```
+
+
+### 1.5 HOW LONG WAS THE A/B TEST RUN? SAME FOR BOTH GROUPS?
+
+- Looks like ~41 days and the date ranges are the same for both groups.
+- Upon initial inspection I suspect the A/B test was specifically for Oct, 2018.
+
+```{r, include=TRUE, echo=FALSE}
+# Summarise to get min/max dates by group
+applicant_tbl %>% 
+    
+    # Group by test-group and get min/max dates
+    group_by(group) %>% 
+    summarise(min(event_date), max(event_date)) %>% 
+    
+    # Format table
+    knitr::kable(caption = "Min and Max event dates by group.")
+```
+
+**Was this an OCT Test & extra 11 days allow time for conversion?**
+
+My thoughts here are that we don't want to include applicants that never had a chance to successfully convert to a hired shopper.
+
+**This means we need a cutoff date where we don't allow any more applicantes into the analysis.** For example, if it takes roughly 11 days for applicants to *complete their first batch* (success), then we need to allow that much time to pass. 
+
+- I'm now going to assess the time between application to becoming a succeful hire: *"complete 1st batch"*
+- I will use this info to create a cutoff where anyone who applies after date X will not be in the analysis.
+
+
+### 1.6 TIDY + TRANSFORM DATA TO STUDY TIME-TO-CONVERSION
+
+```{r}
+# Aggregate data to assess time between application and successful hire
+time_to_conversion_tbl <- applicant_tbl %>% 
+    
+    # Select columns and filter for event types
+    select(applicant_id, group, contains("event")) %>% 
+    filter(event %in% c("application_date", "first_batch_completed_date")) %>% 
+    
+    # Pivot and spread event and event_date across columns
+    spread(key = event, value = event_date) %>% 
+    
+    # Filter to get only applicants who converted by dropping rows w/NA values
+    filter(!is.na(first_batch_completed_date)) %>% 
+    
+    # Calculate time between application date and hire date
+    mutate(days_to_conversion = first_batch_completed_date - application_date)
+
+# View time to conversion table by pulling 5 sample rows
+time_to_conversion_tbl %>% sample_n(5) %>% 
+    knitr::kable(caption = "Days to conversion by successful applicants.")
+```
+
+
+### 1.7 HOW LONG DOES IT TAKE TO MOVE THROUGH HIRING FUNNEL?
+
+What does the distribution of time-to-conversion in days look like?
+
+```{r, fig.height=2.5,  fig.align="center", echo=FALSE}
+# Plot days to hire
+time_to_conversion_tbl %>% 
+    
+    # Aggregate data
+    count(days_to_conversion) %>%
+    
+    # Choose Geoms for plotting
+    ggplot(aes(days_to_conversion, n)) +
+    geom_col(fill = '#2c3e50') +
+    geom_vline(aes(xintercept = time_to_conversion_tbl %>% pull(days_to_conversion) %>% mean()), color = "red") +
+    
+    # Formatting
+    theme_tq() +
+    scale_x_continuous(breaks = seq(2, 40, 2)) +
+    labs(
+        title    = "Successful Applicants through Recruitment Funnel",
+        subtitle = "Red line is average days (8.6) for applicants to convert to shoppers successfully.",
+        x        = "Days between Submitted Application to First Batch Completed",
+        y        = "Shopper Count"
+    )
+```
+
+### 1.8 IS IT APPROPRIATE TO USE 10/31/2018 AS A CUTOFF?
+
+The data is nicely distributed and so let's take a look closer at how it's distributed.
+
+- This will inform our cutoff for which applicants go into the analysis of the A/B test.
+- The 11 days in NOV might be enough to allow most applicants who will convert, to convert.
+
+High-level summary (table 5) shows that the ~11 days is above the 75th percentile and will capture the majority of 'successes.' Meaning that this should give plenty of time for MOST conversions to have been completed.
+
+```{r, echo=FALSE}
+# Summarize data to look at the quartiles and the median days to success
+time_to_conversion_tbl %>%
+    summarize(
+        median      = median(days_to_conversion),
+        mean        = round(mean(days_to_conversion), 1),
+        Q1          = quantile(days_to_conversion, probs = 0.25, na.rm = TRUE),
+        Q3          = quantile(days_to_conversion, probs = 0.75, na.rm = TRUE),
+        IQR         = IQR(days_to_conversion, na.rm = TRUE),
+        min         = min(days_to_conversion),
+        max         = max(days_to_conversion)
+        ) %>% 
+    select(min, Q1, median, mean, Q3, max, IQR) %>% 
+    knitr::kable(caption = "High-level summary of distribution stats")
+```
+
+```{r, echo=FALSE}
+# Summarize data to look at the quartiles and the median days to success (by group)
+time_to_conversion_tbl %>% 
+    group_by(group) %>% 
+    summarize(
+        median      = median(days_to_conversion),
+        mean        = round(mean(days_to_conversion), 1),
+        Q1          = quantile(days_to_conversion, probs = 0.25, na.rm = TRUE),
+        Q3          = quantile(days_to_conversion, probs = 0.75, na.rm = TRUE),
+        IQR         = IQR(days_to_conversion, na.rm = TRUE),
+        min         = min(days_to_conversion),
+        max         = max(days_to_conversion)
+        ) %>% 
+    ungroup() %>% 
+    select(group, min, Q1, median, mean, Q3, max, IQR) %>% 
+    knitr::kable(caption = "Summary of distribution stats by experimental group(s)")
+```
+
+**Key-Takeaways**
+
+1) Based on findings, I will use 10/31/2018 as the cutoff date and assume OCT A/B Test. 
+2) Any applicants who applied after that will be dropped from the analysis.
+3) This is our **first indication of differences between treatments** (Table 6).
+    - Initial inspection suggests treatment group applicants are converting quicker (10-days vs. 7-days).
+
+
+### 1.9 SHOPPER HIRING FUNNEL: CONTROL VS. TREATMENT
+
+**Preliminary Results** in plot: Data includes NOV applicants. Just wrapping my mind around funnel.
+
+```{r, fig.height=2, echo=F}
+
+# Plot shopper hiring funnel by experimental group
+applicant_tbl %>% 
+    
+    # Wrangle data + transform for plotting
+    arrange(applicant_id, group, event_date) %>% 
+    group_by(group, event) %>% 
+    summarize(n = n()) %>% 
+    ungroup() %>% 
+    group_by(group) %>% 
+    top_n(7, n) %>% 
+    mutate(pct = n / max(n),
+           pct_text = scales::percent(pct)) %>% 
+    ungroup() %>% 
+    mutate(event = str_replace(event, pattern = "_date", replacement = ""),
+           event = str_replace_all(event, pattern = "_", replacement = " "),
+           event = str_to_title(event)) %>% 
+    mutate(event = fct_reorder(event, pct)) %>% 
+    # filter(event %in% c("Application", "Background Check Initiated",
+    #                     "Background Check Completed", "First Batch Completed")) %>% 
+    
+    # Plot data
+    ggplot(aes(event, pct, color = group)) +
+    geom_segment(aes(xend = event, yend = 0), size = 1) +
+    geom_point(size = 4) +
+    #geom_col(show.legend = F) +
+    geom_label(aes(label = pct_text), color = "black", fill = "white", hjust = 1, size = 2) +
+    
+    # Format data
+    facet_wrap(~ group, scales = "free_x") +
+    coord_flip() + theme_tq() +
+    scale_color_tq() + theme(legend.position = "none") +
+    scale_y_continuous(label = scales::percent_format()) +
+    labs(
+        #title = "Shopper Hiring Funnel",
+        #subtitle = "Includes November applicants too.",
+        x = "", y = "% of Applicants (from total) Reaching Hiring Funnel Event Stage") 
+```
+
+Initial inspection indicates large differences in conversion rates between Control vs. Treatment.
+
+- See differences between groups for '1st Batch Completed' (34.3% vs. 19.8%). **PRELIMINARY**
+
+\newpage
+
+# Project Phase 2.0: Use EDA Insights to Wrangle Data for Analysis
+
+The objective here is to aggregate event-level data to applicant-level. 
+
+**NOTE:** I'm often taking time to do sanity checks on my work at each stage. 
+
+### 2.1 PREP EVENT DATA FOR TIME-BASED CALCULATIONS - JOINED IN 2.2 
+
+```{r}
+# Pivot data to get 'application_date" and "1st_batch_date" as seperate features
+app_date_batch_date_for_joins_tbl <- applicant_tbl %>% 
+    
+    # Select columns for pivot
+    select(applicant_id, event, event_date) %>% 
+    
+    # Pivot and spread events across columns with date completed as values
+    spread(key = event, value = event_date) %>% 
+    
+    # Select columns needed for calculating days to conversion: 1st_batch_date - app_date = days
+    select(applicant_id, application_date, first_batch_completed_date) 
+```
+
+### 2.2 WRANGLE DATA INTO THE LEARNING DATA SET FOR ANALYSIS
+
+```{r}
+# Construct learning data with target feature: coverted (success/failure)
+learning_data_tbl <- applicant_tbl %>% 
+    
+    # Drop event date. We will add back with joins 
+    select(-event_date) %>% 
+
+    # Setup temp column. For engineering binary features related to event completion
+    mutate(yes_no = "Yes") %>% 
+    
+    # Pivot & spread events across columns to create binary features (fill NA w/"No")
+    mutate(event = str_replace(event, pattern = "_date", "")) %>% # remove "_date" for event
+    spread(key = event, value = yes_no, fill = "No") %>% # sets event as "yes" or "no"
+    
+    # Join data for calculating days to conversion (inner join is fine b/c both have ALL applicants)
+    inner_join(app_date_batch_date_for_joins_tbl, by = "applicant_id") %>%
+    
+    # Calculate days to conversion for those who successfully completed 1st batch
+    mutate(days_to_conversion = (first_batch_completed_date - application_date)/ddays()) %>% 
+    
+    # Setup Target feature: Success/Failure
+    mutate(converted = case_when(
+        first_batch_completed == "Yes" ~ "Success",
+        TRUE ~ "Failure"
+    )) %>% 
+    
+    # Filter out applicants who applied in November
+    filter(application_date <= "2018-10-31")
+```
+
+```{r, include=FALSE}
+#learning_data_tbl %>% filter(group == "treatment") %>% count(background_check_completed)
+
+# Export Learning Data
+# learning_data_tbl %>% 
+#     write_csv("00_Data/ab_test_outcomes.csv")
+```
+
+\newpage
+
+
+### 2.3 COLUMNS AND ENGINEERED FEATURES IN LEARNING DATA SET
+
+Let's take a quick glimpse of what data we now have at the applicant-level.
+
+- The Target feature is 'converted' denoting shopper hiring funnel completion: 'Success' or 'Failure'
+
+This is a great data set for us to answer the assigned questions. 
+
+- It's also setup nicely for further investigation if we want to do further analysis later to understand the system better e.g., what other factors are driving conversion of applicants to shoppers.
+
+```{r}
+# Transpose data to view glimpse of all features
+learning_data_tbl %>% glimpse
+
+```
+
+\newpage
+
+
+# Project Phase 3.0: Business Understanding + Business Insights
+
+This phase is to quickly derive: A baseline conversion rate from the control. And then, compare the baseline from control to our treatment conversion rate. 
+
+### 3.1 ASSESS BASELINE CONVERSION RATE
+
+\  
+
+```{r, echo=FALSE}
+# Assess baseline conversion rates by looking at control
+learning_data_tbl %>% 
+    
+    # filter by control and sumarize to get conversion rates
+    filter(group == "control") %>% 
+    group_by(converted) %>% 
+    summarize(applicants = n()) %>% 
+    ungroup() %>% 
+    mutate(rate_of_outcome = round(applicants / sum(applicants), 2)) %>% 
+    
+    # formate table
+    knitr::kable(caption = "Conversion outcomes for control group")
+```
+
+**Baseline Conversion Rate:** 0.27
+
+Let's see how the treatment did against the baseline (control group)
+
+### 3.2  COMPARE CONTROL (BASELINE) AGAINST TREATMENT
+
+Let's look at the Control group to get a sense of the baseline rate.
+
+```{r, echo=FALSE}
+
+# Assess conversion rates by group
+learning_data_tbl %>%
+    
+    # group by experiment-group and converted to get counts
+    group_by(group, converted) %>%
+    summarize(applicants = n()) %>%
+    ungroup() %>%
+
+    # group by each 'group' to calculate 'group conversion rates'
+    group_by(group) %>%
+    mutate(conversion_rate = round(applicants / sum(applicants), 2)) %>%
+    
+    # Filter for 'successful' conversion
+    filter(converted == "Success") %>% 
+    
+    # Format table
+    knitr::kable(caption = "Conversion Rates by Group")
+
+```
+
+**Key Takeaway:** Conversion rate by treatment (0.43) saw a 60% increase agains control (0.27)
+
+
+### 3.3 QUICK LOOK TO SEE IF CATEGORY CHANNEL WAS SAMPLED EQUALLY
+
+```{r, echo=FALSE}
+learning_data_tbl %>% 
+    count(group, channel) %>% 
+    group_by(group) %>% 
+    mutate(pct_channle_by_group = round(n / sum(n), 2)) %>% 
+    knitr::kable(caption = "Proportions sampled by group, channel")
+    
+```
+
+Overall, this looks like they were equally sampled. This will build confidence in results.
+
+### 3.4 QUICK LOOK AT CONVERSION RATES BY CHANNEL
+
+This is a quick look at how conversion rates vary by channel, and by experiment group.
+
+**NOTE:** This is preliminary.
+
+My concern here is that other factors could influence our conversion rate.
+
+```{r, echo=FALSE}
+# Let's first look at the control by itself
+learning_data_tbl %>% 
+    
+    filter(group == "control") %>% 
+    
+    # group by experiment-group and converted to get counts
+    group_by(channel, converted) %>%
+    summarize(applicants = n(),
+              group      = first(group)) %>%
+    ungroup() %>%
+
+    # group by each 'group' to calculate 'group conversion rates'
+    group_by(channel) %>%
+    mutate(conversion_rate = round(applicants / sum(applicants), 2)) %>%
+    
+    # Filter for 'successful' conversion
+    filter(converted == "Success") %>% 
+    select(group, channel, conversion_rate) %>% 
+    arrange(desc(conversion_rate)) %>% 
+    janitor::clean_names(case = "upper_camel") %>% 
+    
+    # Format table
+    knitr::kable(caption = "Conversion Rates by Control Group")
+
+# Let's first look at the control by itself
+learning_data_tbl %>% 
+    
+    filter(group == "treatment") %>% 
+    
+    # group by experiment-group and converted to get counts
+    group_by(channel, converted) %>%
+    summarize(applicants = n(),
+              group      = first(group)) %>%
+    ungroup() %>%
+
+    # group by each 'group' to calculate 'group conversion rates'
+    group_by(channel) %>%
+    mutate(conversion_rate = round(applicants / sum(applicants), 2)) %>%
+    
+    # Filter for 'successful' conversion
+    filter(converted == "Success") %>% 
+    select(group, channel, conversion_rate) %>% 
+    arrange(desc(conversion_rate)) %>% 
+    janitor::clean_names(case = "upper_camel") %>% 
+    
+    # Format table
+    knitr::kable(caption = "Conversion Rates by Treatment Group")
+
+```
+
+**Key Takeaway:** Definitely variation in conversion rates by Channel, Group.
+
+- See job-search-site: 0.16 for control & 0.38 for treatment.
+
+This variation indicates a more thorough investigation would help derive further insights to identify the primary drivers behind applicant conversion rates.
+
+\newpage
+
+# Project Phase 4.0: Data Understanding for Time-To-Conversion
+
+Let's take a look at the distributions for time-to-conversion.
+
+### 4.1 DOES THE TREATMENT SEE QUICKER START TIMES?
+
+```{r, fig.height=3}
+learning_data_tbl %>% 
+    select(group, days_to_conversion, group) %>% 
+    plot_ggpairs(color = group)
+
+#learning_data_tbl %>% group_by(group) %>% summarize(mean_days = mean(days_to_conversion, na.rm = T))
+```
+
+**Key Takeaway:** Very Large differences between the two groups.
+
+- We can say with confidence that initiating the background check earlier definitely leads to quicker start times.
+
+Without doing a statistical test, I'd say these two distributions are VERY different and that they'd be significant if looked at closer.
+
+\newpage
+
+# Project Phase 5.0: Analyzing A/B Test Results
+
+### 5.1 QUICK STATS TO GET SIGNIFICANCE
+
+Everything so far points towards these results being significant (Results related to conversion rates).
+
+\  
+
+I did get the counts below and use this calculator here to determine statistical significance
+
+Site: https://neilpatel.com/ab-testing-calculator/
+
+\  
+
+I also used this site recomended by a friend of mine who is a product analyst
+
+- I used this to get the sample size and look at minimum detectable effect details
+
+Site: https://www.evanmiller.org/ab-testing/sample-size.html
+
+
+```{r}
+
+# Get counts by group
+learning_data_tbl %>% count(group)
+
+# Get success and failure by group
+learning_data_tbl %>% 
+    count(group, converted)
+```
+
+### 5.1 MY EXPERIENCE WITH A/B TESTING
+
+Profesionally I've not used A/B Testing but am fascinated by scientific experimenation.
+
+- I'd be very interested in building expertise in this area.
+- And in more sophisticated methods that complement understanding these systems.
+
+\newpage
+
+
+# Project Phase 6.0: Craft Plots for Presentation
+
+\  
+
+```{r, echo=FALSE, fig.height=2}
+#learning_data_tbl %>% count(group, background_check_completed)
+
+funnel_by_group_event_tbl <- learning_data_tbl %>% 
+    select(applicant_id, group, application, contains("background"), first_batch_completed) %>% 
+    gather(-applicant_id, -group, key = event, value = yes_no) %>% 
+    arrange(applicant_id) %>% 
+    filter(yes_no == "Yes") %>% 
+    group_by(group, event) %>% 
+    summarize(n = n()) %>% 
+    ungroup() %>% 
+    group_by(group) %>% 
+    top_n(7, n) %>% 
+    mutate(pct = n / max(n),
+           pct_text = scales::percent(pct)) %>% 
+    ungroup() %>% 
+    mutate(event = str_replace(event, pattern = "_date", replacement = ""),
+           event = str_replace_all(event, pattern = "_", replacement = " "),
+           event = str_to_title(event)) %>% 
+    mutate(event = fct_reorder(event, pct)) %>% 
+    mutate(group = str_to_title(group))
+  
+funnel_by_group_event_tbl %>%   
+    # Plot data
+    ggplot(aes(event, pct, color = group)) +
+    geom_segment(aes(xend = event, yend = 0), size = 1.2) +
+    geom_point(size = 4) +
+    #geom_col(show.legend = F) +
+    geom_label(aes(label = pct_text), color = "black", fill = "white", hjust = 1, size = 4) +
+    
+    # Format data
+    facet_wrap(~ group, scales = "free_x") +
+    coord_flip() + theme_tq() +
+    scale_color_tq() + theme(legend.position = "none") +
+    scale_y_continuous(label = scales::percent_format()) +
+    labs(
+        title = "Partial Shopper Hiring Funnel",
+        subtitle = "Successful conversion is when applicant completes their first batch (Bottom of Plot).",
+        x = "", y = "% of Applicants Reaching Hiring Funnel Stage(s)") 
+```
+
+\  
+
+```{r, echo=FALSE, fig.height=2.5}
+funnel_by_group_event_tbl %>% 
+    #filter(event %in% c("Application", "Background Check Initiated", "First Batch Completed")) %>% 
+    filter(event == "Background Check Initiated") %>% 
+    mutate(event = "Background\n Check Initiated") %>% 
+    mutate(
+        sample = 100,
+        bg_30 = pct*sample*30, bg_50 = pct*sample*50, bg_100 = pct*sample*100,
+        bg_30 = scales::dollar(bg_30, accuracy = 1),
+        bg_50 = scales::dollar(bg_50, accuracy = 1),
+        bg_100 = scales::dollar(bg_100, accuracy = 1)) %>% 
+    mutate(
+        label_text = 
+            str_glue("Applicants to Funnel Stage:{pct_text}\nScenario   1 ($30):{bg_30}\nScenario   2 ($50):{bg_50}\nScenario 3 ($100):{bg_100}")) %>% 
+    
+    ggplot(aes(event, pct, color = group)) +
+    geom_segment(aes(xend = event, yend = 0), size = 1.2) +
+    geom_point(size = 4) +
+    #geom_col(show.legend = F) +
+    geom_label(aes(label = label_text), color = "black", fill = "white", hjust = 1, size = 3) +
+    
+    # Format data
+    facet_wrap(~ group, scales = "free_x") +
+    coord_flip() + theme_tq() +
+    scale_color_tq() + theme(legend.position = "none") +
+    scale_y_continuous(label = scales::percent_format()) +
+    labs(
+        title = "Lets Consider 100 Applicants for Simplicity",
+        subtitle = "Plot shows the Cost of Initiating the Background Check under 3 different Cost Scenarios: $30, $50, or $100.",
+        x = "", y = "% of Applicants") 
+
+```
+
+
