@@ -1,4 +1,4 @@
-## Analyzing the results of an AB Test ran to test improvements to the hiring funnel
+## Analyzing the results of an AB Test ran to test hiring funnel improvements.
 
 Short analysis I did to look at experimental results following AB Testing for an HR problem faced by a local SF tech company.
 
